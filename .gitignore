@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.claude/
+data/
+d1_export/
+*.npy
+*.pyc
+HANDOFF.md
