@@ -51,7 +51,7 @@ def test_health_503_until_loaded():
 
 def test_health_ok_when_loaded(dev):
     r = dev.get("/health")
-    assert r.status_code == 200 and r.json()["status"] == "ok" and r.json()["articles"] == 202450
+    assert r.status_code == 200 and r.json()["status"] == "ok" and r.json()["articles"] == len(dev.app.state.engine.index.ids) >= 202450
 
 
 def test_search_shape_and_order(dev):
@@ -59,7 +59,7 @@ def test_search_shape_and_order(dev):
     assert r.status_code == 200
     body = r.json()
     res = body["results"]
-    assert len(res) == 10 and set(res[0]) == {"id", "title", "url", "score"}
+    assert len(res) == 10 and set(res[0]) == {"id", "title", "url", "snippet", "score"}
     scores = [x["score"] for x in res]
     assert scores == sorted(scores, reverse=True)
     assert "timing_ms" in body and body["timing_ms"]["embed"] > 0
@@ -72,7 +72,7 @@ def test_duplicates_combined(engine, dev):
     # four URL variants of the same essay come back as one result
     assert sum("student's guide to startups" in norm(x["title"]) for x in res) == 1
     # a title may repeat only when the pages really differ (e.g. two different lectures)
-    row_of = {int(i): k for k, i in enumerate(engine.ids)}
+    row_of = {int(i): k for k, i in enumerate(engine.index.ids)}
     for i, a in enumerate(res):
         for b in res[i + 1:]:
             if norm(a["title"]) == norm(b["title"]):

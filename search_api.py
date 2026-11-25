@@ -1,7 +1,7 @@
 """
-Semantic search API for vishal.fast/reading.
+Semantic search API for vishal.fast/curius.
 
-    GET /search?q=...   top 10 articles by meaning: id, title, url, score
+    GET /search?q=...   top 10 articles by meaning: id, title, url, snippet, score
     GET /health         200 only when the model and vectors are loaded
 
 Run (one worker; all state lives in this process):
@@ -11,11 +11,12 @@ Run (one worker; all state lives in this process):
 Settings come from environment variables (all optional):
     APP_ENV             prod (default) or dev
     VEC_DIR             folder with ids.npy, vec_*.npy, manifest.json   (data/vectors)
-    DB_PATH             SQLite file with a `links` table: id, url, title (data/kaggle/articles.sqlite)
+    DB_PATH             SQLite file with a `links` table: id, url, title, snippet (data/kaggle/articles.sqlite)
     VEC_DTYPE           float32 (default) or float16 (half the RAM, see compare_fp16.py)
     TORCH_THREADS       threads per embedding (2)
     MAX_CONCURRENT      embeddings at once, also the number of model copies (2)
     RATE_PER_MIN, RATE_PER_DAY   per visitor (12, 300)
+    RELOAD_CHECK_S      seconds between checks for a newer manifest.json from update_index.py (60, 0 = never)
 
 Prod: every request must arrive through cloudflared, which sets CF-Connecting-IP. The rate limit
 uses that header. Dev: falls back to the connection IP, and CORS allows http://localhost.
@@ -63,6 +64,8 @@ class Settings:
     dup_cosine: float = 0.995
     prod_origin: str = "https://vishal.fast"
     fp16_chunk: int = 20_000
+    snippet_chars: int = 280
+    reload_check_s: float = 60.0
 
     @classmethod
     def from_env(cls):
@@ -77,6 +80,7 @@ class Settings:
             rate_per_min=int(e("RATE_PER_MIN", 12)),
             rate_per_day=int(e("RATE_PER_DAY", 300)),
             queue_wait_s=float(e("QUEUE_WAIT_S", 0)),
+            reload_check_s=float(e("RELOAD_CHECK_S", 60)),
         )
 
 
@@ -96,6 +100,70 @@ def is_curius_url(url):
     return host == "curius.app" or host.endswith(".curius.app")
 
 
+def short_snippet(text, max_chars):
+    """Preview for a result card: whitespace collapsed, cut at a word boundary."""
+    t = " ".join((text or "").split())
+    if len(t) <= max_chars:
+        return t
+    cut = t[:max_chars].rsplit(" ", 1)[0].rstrip(",.;:-")
+    return cut + "\u2026"
+
+
+@dataclass
+class Index:
+    """Everything a search reads. Replaced as a whole on reload, so a search never sees half of one."""
+    manifest_mtime: int
+    ids: np.ndarray
+    matrix: np.ndarray
+    m16: object
+    titles: list
+    urls: list
+    snippets: list
+    title_norm: list
+    exclude: np.ndarray
+
+
+def read_index(s):
+    """Load vectors and article metadata from disk (no model)."""
+    import json
+
+    from update_index import chunk_files
+
+    man_path = s.vec_dir / "manifest.json"
+    mtime = man_path.stat().st_mtime_ns
+    manifest = json.loads(man_path.read_text())
+    if manifest["model"] != MODEL_ID or manifest["dims"] != 1024:
+        raise RuntimeError(f"vectors were made with {manifest['model']}, expected {MODEL_ID}")
+    ids = np.load(s.vec_dir / "ids.npy")
+    dtype = np.float16 if s.vec_dtype == "float16" else np.float32
+    parts = [s.vec_dir / f for f in chunk_files(s.vec_dir, manifest)]
+    matrix = np.vstack([np.load(p).astype(dtype, copy=False) for p in parts])
+    if matrix.shape[0] != len(ids) or len(ids) != manifest["count"]:
+        raise RuntimeError("vector count does not match ids.npy / manifest.json")
+
+    con = sqlite3.connect(s.db_path)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(links)")}
+    snip = "snippet" if "snippet" in cols else "NULL"
+    meta = {r[0]: r[1:] for r in con.execute(f"SELECT id, title, url, {snip} FROM links")}
+    con.close()
+    missing = [int(i) for i in ids if int(i) not in meta]
+    if missing:
+        raise RuntimeError(f"{len(missing)} vector ids are not in the database, e.g. {missing[:3]}")
+    rows = [meta[int(i)] for i in ids]
+    titles = [r[0] or "" for r in rows]
+    urls = [r[1] or "" for r in rows]
+    m16 = None
+    if dtype == np.float16:
+        import torch
+        m16 = torch.from_numpy(matrix)
+    return Index(
+        manifest_mtime=mtime, ids=ids, matrix=matrix, m16=m16, titles=titles, urls=urls,
+        snippets=[short_snippet(r[2], s.snippet_chars) for r in rows],
+        title_norm=[" ".join(t.lower().split()) for t in titles],
+        exclude=np.array([is_curius_url(u) for u in urls], dtype=bool),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Engine: vectors, article metadata, and a pool of model copies
 # ---------------------------------------------------------------------------
@@ -105,43 +173,21 @@ class Engine:
         self.s = settings
         self.ready = False
         self._load_lock = threading.Lock()
+        self._failed_mtime = None
 
     def load(self):
         """Idempotent. Loads vectors, metadata and model copies, then runs one warm-up query."""
         with self._load_lock:
             if self.ready:
                 return
-            import json
-
             import torch
             from sentence_transformers import SentenceTransformer
 
             s = self.s
             t0 = time.time()
             torch.set_num_threads(s.torch_threads)
-
-            manifest = json.loads((s.vec_dir / "manifest.json").read_text())
-            if manifest["model"] != MODEL_ID or manifest["dims"] != 1024:
-                raise RuntimeError(f"vectors were made with {manifest['model']}, expected {MODEL_ID}")
-            ids = np.load(s.vec_dir / "ids.npy")
-            dtype = np.float16 if s.vec_dtype == "float16" else np.float32
-            parts = sorted(s.vec_dir.glob("vec_*.npy"))
-            self.matrix = np.vstack([np.load(p).astype(dtype, copy=False) for p in parts])
-            if self.matrix.shape[0] != len(ids) or len(ids) != manifest["count"]:
-                raise RuntimeError("vector count does not match ids.npy / manifest.json")
-
-            con = sqlite3.connect(s.db_path)
-            meta = {r[0]: (r[1], r[2]) for r in con.execute("SELECT id, title, url FROM links")}
-            con.close()
-            missing = [int(i) for i in ids if int(i) not in meta]
-            if missing:
-                raise RuntimeError(f"{len(missing)} vector ids are not in the database, e.g. {missing[:3]}")
-            self._m16 = torch.from_numpy(self.matrix) if dtype == np.float16 else None
-            self.ids = ids
-            self.titles = [meta[int(i)][0] or "" for i in ids]
-            self.urls = [meta[int(i)][1] or "" for i in ids]
-            self.title_norm = [" ".join(t.lower().split()) for t in self.titles]
-            self.exclude = np.array([is_curius_url(u) for u in self.urls], dtype=bool)
+            self.index = read_index(s)
+            ids = self.index.ids
 
             self.pool = queue.Queue()
             for _ in range(s.max_concurrent):
@@ -159,6 +205,33 @@ class Engine:
             self.ready = True
             log.info("engine ready: %s vectors (%s), %d model copies, %.0fs",
                      f"{len(ids):,}", s.vec_dtype, s.max_concurrent, time.time() - t0)
+
+    @property
+    def matrix(self):
+        return self.index.matrix
+
+    def reload_if_changed(self):
+        """Swap in a newer index written by update_index.py. Returns True if it reloaded.
+
+        Searches keep using the old index until the new one is fully loaded (memory briefly holds
+        both). A broken or half-written folder is logged and skipped; the old index stays live."""
+        if not self.ready:
+            return False
+        mtime = None
+        try:
+            mtime = (self.s.vec_dir / "manifest.json").stat().st_mtime_ns
+            if mtime in (self.index.manifest_mtime, self._failed_mtime):
+                return False
+            t0 = time.time()
+            new = read_index(self.s)
+        except Exception:
+            self._failed_mtime = mtime  # don't retry (and re-log) the same broken manifest every check
+            log.exception("index reload failed; still serving %s vectors", f"{len(self.index.ids):,}")
+            return False
+        old = len(self.index.ids)
+        self.index = new
+        log.info("index reloaded: %s -> %s vectors, %.0fs", f"{old:,}", f"{len(new.ids):,}", time.time() - t0)
+        return True
 
     # -- model pool: taking a copy is the concurrency limit --------------------
     def acquire(self, wait_s=0.0):
@@ -183,11 +256,13 @@ class Engine:
                 self.pool.put(model)
 
     # -- search ---------------------------------------------------------------
-    def row_f32(self, row):
-        return self.matrix[row].astype(np.float32, copy=False)
+    @staticmethod
+    def row_f32(idx, row):
+        return idx.matrix[row].astype(np.float32, copy=False)
 
-    def scores(self, qv):
-        m = self.matrix
+    def scores(self, qv, idx=None):
+        idx = idx or self.index
+        m = idx.matrix
         if m.dtype == np.float32:
             return m @ qv
         import torch
@@ -196,26 +271,28 @@ class Engine:
         out = np.empty(m.shape[0], dtype=np.float32)
         step = self.s.fp16_chunk
         for lo in range(0, m.shape[0], step):
-            out[lo:lo + step] = (self._m16[lo:lo + step].float() @ q).numpy()
+            out[lo:lo + step] = (idx.m16[lo:lo + step].float() @ q).numpy()
         return out
 
     def search(self, qv):
         s = self.s
-        scores = self.scores(qv)
-        cand = np.argpartition(-scores, s.topk_retrieve)[:s.topk_retrieve]
+        idx = self.index  # one consistent snapshot, even if a reload swaps it meanwhile
+        scores = self.scores(qv, idx)
+        k = min(s.topk_retrieve, len(scores))
+        cand = np.argpartition(-scores, k - 1)[:k]
         cand = cand[np.argsort(-scores[cand])]
         results, kept_by_title = [], {}
         for row in cand:
-            if self.exclude[row]:
+            if idx.exclude[row]:
                 continue
-            tn = self.title_norm[row]
+            tn = idx.title_norm[row]
             if tn:
-                v = self.row_f32(row)
-                if any(float(v @ self.row_f32(o)) > s.dup_cosine for o in kept_by_title.get(tn, ())):
+                v = self.row_f32(idx, row)
+                if any(float(v @ self.row_f32(idx, o)) > s.dup_cosine for o in kept_by_title.get(tn, ())):
                     continue  # same title AND near-identical vector: the same article under another URL
                 kept_by_title.setdefault(tn, []).append(row)
-            results.append({"id": int(self.ids[row]), "title": self.titles[row],
-                            "url": self.urls[row], "score": round(float(scores[row]), 4)})
+            results.append({"id": int(idx.ids[row]), "title": idx.titles[row], "url": idx.urls[row],
+                            "snippet": idx.snippets[row], "score": round(float(scores[row]), 4)})
             if len(results) == s.topk_return:
                 break
         return results
@@ -289,11 +366,21 @@ def create_app(settings=None, engine=None):
     limiter = RateLimiter(s.rate_per_min, s.rate_per_day)
     cache = QueryCache(s.cache_size)
 
+    stop_watch = threading.Event()
+
+    def watch_index():
+        while not stop_watch.wait(s.reload_check_s):
+            if eng.reload_if_changed():
+                cache.clear()  # cached answers were computed against the old index
+
     @asynccontextmanager
     async def lifespan(app):
         if not eng.ready:
             eng.load()  # blocks start-up, so the server only accepts requests once it is ready
+        if s.reload_check_s > 0:
+            threading.Thread(target=watch_index, name="index-watch", daemon=True).start()
         yield
+        stop_watch.set()
 
     prod = s.env == "prod"
     app = FastAPI(title="Curius search", lifespan=lifespan,

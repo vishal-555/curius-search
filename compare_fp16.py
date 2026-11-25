@@ -52,8 +52,9 @@ def main():
     e32 = Engine(Settings(env="dev", max_concurrent=1))
     e32.load()
     e16 = copy.copy(e32)
-    e16.matrix = e32.matrix.astype(np.float16)
-    e16._m16 = torch.from_numpy(e16.matrix)  # the API builds this at load time when VEC_DTYPE=float16
+    m16 = e32.matrix.astype(np.float16)
+    # the API builds m16 at load time when VEC_DTYPE=float16
+    e16.index = dataclasses.replace(e32.index, matrix=m16, m16=torch.from_numpy(m16))
     e16.s = dataclasses.replace(e32.s, vec_dtype="float16")
 
     print(f"memory: float32 {e32.matrix.nbytes / 1e6:.0f} MB | float16 {e16.matrix.nbytes / 1e6:.0f} MB\n")
