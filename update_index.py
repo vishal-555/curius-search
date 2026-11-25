@@ -189,7 +189,8 @@ def main():
     p.add_argument("--limit", type=int, help="embed at most this many new links")
     p.add_argument("--commit-every", type=int, default=1000, help="articles per new chunk file (1000)")
     p.add_argument("--batch", type=int, default=16, help="encode batch size (16)")
-    p.add_argument("--threads", type=int, default=os.cpu_count() or 4, help="torch threads")
+    p.add_argument("--threads", type=int, default=max(1, (os.cpu_count() or 2) // 2),
+                   help="torch threads (default: half the logical CPUs; more oversubscribes and can stall)")
     p.add_argument("--source-db", type=Path, default=SOURCE_DB)
     p.add_argument("--search-db", type=Path, default=SEARCH_DB)
     p.add_argument("--vec-dir", type=Path, default=VEC_DIR)
