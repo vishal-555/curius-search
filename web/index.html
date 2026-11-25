@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Curius search</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700&family=Lora:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+    <style>
+        /* Look follows curius.app: white page, grey UI text, bold serif titles, thin dividers. */
+        :root {
+            --text: #222;
+            --muted: #707070;
+            --faint: #9a9a9a;
+            --line: #ececec;
+            --field: #f4f4f4;
+            --field-focus: #ededed;
+            --mark: #f3f3f3;
+            --accent: #6aa6e8;
+            --error: #b3261e;
+            --sans: "Lato", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+            --serif: "Lora", Georgia, "Times New Roman", serif;
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; background: #fff; color: var(--text); }
+        body { font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+        a { color: inherit; }
+
+        .top {
+            display: flex; align-items: center; justify-content: space-between; gap: 16px;
+            padding: 18px 18px 0;
+        }
+        .wordmark { font-size: 21px; text-decoration: none; letter-spacing: 0.01em; }
+        .wordmark span { color: var(--faint); }
+        .top nav { display: flex; gap: 20px; font-size: 14px; color: var(--muted); }
+        .top nav a { text-decoration: none; }
+        .top nav a:hover { color: var(--text); }
+
+        main { max-width: 500px; margin: 0 auto; padding: 0 16px 80px; }
+        .hero { padding: 120px 0 28px; transition: padding .25s ease; }
+        body.has-results .hero { padding-top: 40px; }
+
+        form { margin: 0; }
+        .field {
+            display: block; width: 100%; height: 40px; padding: 0 16px;
+            border: 0; border-radius: 6px; background: var(--field);
+            font: inherit; font-size: 14px; color: var(--text); outline: none;
+        }
+        .field::placeholder { color: var(--muted); }
+        .field:focus { background: var(--field-focus); }
+        .field::-webkit-search-cancel-button { cursor: pointer; }
+
+        .section-head {
+            display: flex; justify-content: space-between; align-items: baseline;
+            margin-top: 36px; padding-bottom: 4px; border-bottom: 1px solid var(--line);
+            font-size: 14px;
+        }
+        .section-head .meta { color: var(--faint); font-size: 13px; }
+
+        .examples { list-style: none; margin: 0; padding: 6px 0 0; }
+        .examples button {
+            display: flex; align-items: center; gap: 8px; width: 100%;
+            padding: 9px 0; border: 0; background: none; cursor: pointer;
+            font: inherit; font-size: 14px; color: var(--muted); text-align: left;
+        }
+        .examples button::before {
+            content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+        }
+        .examples button:hover { color: var(--text); }
+
+        h1.results-title {
+            margin: 8px 0 0; padding-bottom: 14px; border-bottom: 1px solid var(--line);
+            font: 700 26px/1.25 var(--sans); letter-spacing: -0.005em;
+        }
+        .status { min-height: 20px; margin: 12px 0 0; font-size: 13px; color: var(--muted); }
+        .status.error { color: var(--error); }
+
+        .results { list-style: none; margin: 0; padding: 0; }
+        .result { padding: 26px 0 24px; border-bottom: 1px solid var(--line); }
+        .result .byline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+        .result .favicon { width: 16px; height: 16px; border-radius: 50%; background: var(--field); flex: none; }
+        .result .score { color: var(--faint); }
+        .result h2 { margin: 8px 0 0; font: 700 18px/1.35 var(--serif); }
+        .result h2 a { text-decoration: none; }
+        .result h2 a:hover { text-decoration: underline; text-underline-offset: 3px; }
+        .result .domain { margin-top: 1px; font-size: 14px; color: var(--faint); }
+        .result .snippet {
+            margin: 12px 0 0; font-size: 14px; line-height: 1.6; color: #333;
+            overflow-wrap: anywhere;
+        }
+
+        .skeleton .bar { height: 12px; border-radius: 4px; background: var(--field); margin-top: 10px; }
+        .skeleton .bar.title { height: 18px; width: 70%; margin-top: 12px; }
+        .skeleton .bar.short { width: 35%; }
+        @media (prefers-reduced-motion: no-preference) {
+            .skeleton .bar { animation: pulse 1.2s ease-in-out infinite; }
+            @keyframes pulse { 50% { opacity: .5; } }
+        }
+
+        .note { margin-top: 40px; font-size: 12px; color: var(--faint); line-height: 1.6; }
+        .visually-hidden {
+            position: absolute; width: 1px; height: 1px; overflow: hidden;
+            clip: rect(0 0 0 0); white-space: nowrap;
+        }
+        @media (max-width: 480px) {
+            .hero { padding-top: 56px; }
+            .top nav { gap: 14px; }
+            .result h2 { font-size: 17px; }
+        }
+    </style>
+</head>
+<body>
+    <header class="top">
+        <a class="wordmark" href="./">Curius <span>search</span></a>
+        <nav>
+            <a href="https://curius.app" target="_blank" rel="noopener">curius.app</a>
+            <a href="https://vishal.fast" target="_blank" rel="noopener">vishal.fast</a>
+        </nav>
+    </header>
+
+    <main>
+        <div class="hero">
+            <form id="search-form" role="search">
+                <label class="visually-hidden" for="q">Search articles saved on Curius</label>
+                <input class="field" id="q" name="q" type="search" maxlength="300" autocomplete="off"
+                       spellcheck="false" placeholder="What do you want to learn?">
+            </form>
+        </div>
+
+        <section id="start">
+            <div class="section-head"><span>Try</span><span class="meta" id="count"></span></div>
+            <ul class="examples" id="examples">
+                <li><button type="button">advice for doing good research as a beginner</button></li>
+                <li><button type="button">how semiconductor companies compete</button></li>
+                <li><button type="button">interpretability of neural networks</button></li>
+                <li><button type="button">habits of highly productive people</button></li>
+                <li><button type="button">essays about taste in software design</button></li>
+            </ul>
+        </section>
+
+        <section id="found" hidden>
+            <h1 class="results-title" id="results-title">Results</h1>
+            <p class="status" id="status" role="status" aria-live="polite"></p>
+            <ol class="results" id="results"></ol>
+        </section>
+
+        <p class="note">Searches by meaning across articles people saved on Curius, using an open-source
+            embedding model (Qwen3-Embedding-0.6B) on a small server. No names are shown.</p>
+    </main>
+
+    <script>
+    (function () {
+        "use strict";
+
+        var isLocal = ["localhost", "127.0.0.1"].indexOf(location.hostname) !== -1;
+        var API = isLocal ? "http://127.0.0.1:8000" : "https://api.vishal.fast";
+
+        var $ = function (id) { return document.getElementById(id); };
+        var form = $("search-form"), input = $("q"), statusEl = $("status"), list = $("results");
+        var start = $("start"), found = $("found"), heading = $("results-title");
+        var seq = 0, retryTimer = null;
+
+        function setStatus(text, isError) {
+            statusEl.textContent = text;
+            statusEl.classList.toggle("error", !!isError);
+        }
+
+        function showResults(on) {
+            found.hidden = !on;
+            start.hidden = on;
+            document.body.classList.toggle("has-results", on);
+        }
+
+        function domainOf(url) {
+            try { return new URL(url).hostname.replace(/^www\./, ""); } catch (e) { return ""; }
+        }
+
+        // only plain web links become clickable
+        function safeHref(url) {
+            try {
+                var u = new URL(url);
+                return u.protocol === "http:" || u.protocol === "https:" ? u.href : null;
+            } catch (e) { return null; }
+        }
+
+        function retryAfter(res, fallback, cap) {
+            var n = parseInt(res.headers.get("Retry-After"), 10);
+            if (!n || n < 1) n = fallback;
+            return Math.min(n, cap);
+        }
+
+        function el(tag, cls, text) {
+            var e = document.createElement(tag);
+            if (cls) e.className = cls;
+            if (text != null) e.textContent = text;
+            return e;
+        }
+
+        function skeleton() {
+            list.textContent = "";
+            for (var i = 0; i < 3; i++) {
+                var li = el("li", "result skeleton");
+                li.setAttribute("aria-hidden", "true");
+                li.appendChild(el("div", "bar short"));
+                li.appendChild(el("div", "bar title"));
+                li.appendChild(el("div", "bar"));
+                li.appendChild(el("div", "bar"));
+                list.appendChild(li);
+            }
+        }
+
+        function render(results) {
+            list.textContent = "";
+            results.forEach(function (r) {
+                var href = safeHref(r.url), domain = domainOf(r.url);
+                var li = el("li", "result");
+
+                var by = el("div", "byline");
+                if (domain) {
+                    var icon = el("img", "favicon");
+                    icon.alt = "";
+                    icon.loading = "lazy";
+                    icon.referrerPolicy = "no-referrer";
+                    icon.src = "https://icons.duckduckgo.com/ip3/" + encodeURIComponent(domain) + ".ico";
+                    icon.onerror = function () { icon.style.visibility = "hidden"; };
+                    by.appendChild(icon);
+                }
+                by.appendChild(el("span", "score", Math.round(r.score * 100) + "% match"));
+                li.appendChild(by);
+
+                var h = el("h2");
+                var title = (r.title && r.title.trim()) || domain || "Untitled";
+                if (href) {
+                    var a = el("a", null, title);
+                    a.href = href;
+                    a.target = "_blank";
+                    a.rel = "noopener noreferrer";
+                    h.appendChild(a);
+                } else {
+                    h.textContent = title;
+                }
+                li.appendChild(h);
+                if (domain) li.appendChild(el("div", "domain", domain));
+                if (r.snippet) li.appendChild(el("p", "snippet", r.snippet));
+                list.appendChild(li);
+            });
+        }
+
+        async function search(query, isRetry) {
+            var q = query.trim().replace(/\s+/g, " ");
+            if (q.length < 2) {
+                showResults(true);
+                list.textContent = "";
+                setStatus("Type at least two characters.", true);
+                return;
+            }
+
+            clearTimeout(retryTimer);
+            var mine = ++seq; // a newer search makes older answers irrelevant
+            showResults(true);
+            heading.textContent = q;
+            if (!isRetry) { setStatus("Searching…"); skeleton(); }
+
+            var controller = new AbortController();
+            var timeout = setTimeout(function () { controller.abort(); }, 20000);
+            try {
+                var res = await fetch(API + "/search?q=" + encodeURIComponent(q), { signal: controller.signal });
+                if (mine !== seq) return;
+
+                if (res.status === 429) {
+                    var wait = retryAfter(res, 60, 86400);
+                    list.textContent = "";
+                    setStatus("That's a lot of searches. Please try again " +
+                        (wait < 90 ? "in a minute." : "in about " + Math.ceil(wait / 60) + " minutes."), true);
+                    return;
+                }
+                if (res.status === 503) {
+                    if (!isRetry) {
+                        setStatus("The server is busy. Trying again…");
+                        retryTimer = setTimeout(function () { search(q, true); }, retryAfter(res, 2, 5) * 1000);
+                        return;
+                    }
+                    list.textContent = "";
+                    setStatus("The server is busy right now. Please try again in a moment.", true);
+                    return;
+                }
+                if (!res.ok) throw new Error("HTTP " + res.status);
+
+                var data = await res.json();
+                if (mine !== seq) return;
+                var results = Array.isArray(data.results) ? data.results : [];
+                render(results);
+                setStatus(results.length ? results.length + " articles" : "No matches found. Try different words.");
+                try { history.replaceState(null, "", "?q=" + encodeURIComponent(q)); } catch (e) { /* not important */ }
+            } catch (e) {
+                if (mine !== seq) return;
+                list.textContent = "";
+                setStatus(e.name === "AbortError"
+                    ? "The search took too long. Please try again."
+                    : "Can't reach the search server right now. Please try again later.", true);
+            } finally {
+                clearTimeout(timeout);
+            }
+        }
+
+        form.addEventListener("submit", function (event) {
+            event.preventDefault();
+            input.blur();
+            search(input.value, false);
+        });
+
+        $("examples").addEventListener("click", function (event) {
+            var chip = event.target.closest("button");
+            if (!chip) return;
+            input.value = chip.textContent;
+            search(chip.textContent, false);
+        });
+
+        fetch(API + "/health").then(function (r) { return r.ok ? r.json() : null; }).then(function (h) {
+            if (h && h.articles) $("count").textContent = h.articles.toLocaleString() + " articles";
+        }).catch(function () { /* the search itself reports connection problems */ });
+
+        var initial = new URLSearchParams(location.search).get("q");
+        if (initial) {
+            input.value = initial.slice(0, 300);
+            search(input.value, false);
+        } else {
+            input.focus();
+        }
+    })();
+    </script>
+</body>
+</html>
